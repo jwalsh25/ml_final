@@ -1,0 +1,110 @@
+---
+title: "time_series_2"
+author: "Charlie Pepin-Woods"
+date: "2025-04-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r}
+library(dplyr)
+
+# Compute PACF up to max_lag using linear regression
+compute_pacf_manual <- function(series, max_lag = 10) {
+  n <- length(series)
+  pacf_vals <- numeric(max_lag)
+  
+  for (k in 1:max_lag) {
+    if (n <= k) {
+      pacf_vals[k] <- NA
+      next
+    }
+    
+    # Fit full regression of y_t on y_{t-1}, ..., y_{t-k}
+    Y <- series[(k+1):n]
+    X <- embed(series, k + 1)[, -1]  # drop the current value column
+    
+    fit <- lm(Y ~ X)
+    pacf_vals[k] <- coef(fit)[k + 1]  # coefficient for lag k
+  }
+  
+  return(pacf_vals)
+}
+
+# Select optimal lag based on PACF cutoff threshold
+select_optimal_lag <- function(pacf_vals, threshold = 0.2) {
+  # Find the first lag where PACF drops below threshold
+  for (i in 1:length(pacf_vals)) {
+    if (is.na(pacf_vals[i]) || abs(pacf_vals[i]) < threshold) {
+      return(max(1, i - 1))
+    }
+  }
+  return(length(pacf_vals))  # all PACFs are high
+}
+
+# Fit AR(p) using linear regression
+fit_ar_manual <- function(series, p) {
+  n <- length(series)
+  if (n <= p) return(NULL)
+  
+  Y <- series[(p+1):n]
+  X <- embed(series, p + 1)[, -1]  # lag columns
+  
+  fit <- lm(Y ~ X)
+  
+  list(
+    coefficients = coef(fit),
+    residuals = resid(fit),
+    fitted_values = fitted(fit),
+    order = p,
+    model = fit
+  )
+}
+
+# Main function to apply everything
+perform_manual_arp_per_lifter <- function(df, max_lag = 10, pacf_threshold = 0.2) {
+  df$Time <- as.POSIXct(df$Time)
+  results <- list()
+  
+  for (lifter in unique(df$Name)) {
+    lifter_df <- df %>%
+      filter(Name == lifter) %>%
+      arrange(Time)
+    
+    series <- lifter_df$TotalKg
+    
+    if (length(series) < max_lag + 1) {
+      cat("Skipping", lifter, "- not enough data\n")
+      next
+    }
+    
+    pacf_vals <- compute_pacf_manual(series, max_lag)
+    optimal_lag <- select_optimal_lag(pacf_vals, pacf_threshold)
+    
+    cat("Fitting AR(", optimal_lag, ") for", lifter, "\n")
+    
+    ar_model <- fit_ar_manual(series, optimal_lag)
+    
+    if (!is.null(ar_model)) {
+      results[[lifter]] <- list(
+        ar_model = ar_model,
+        pacf = pacf_vals,
+        optimal_lag = optimal_lag
+      )
+    }
+  }
+  
+  return(results)
+}
+```
+
+```{r}
+df <- read.csv("openpowerlifting_interpolated.csv")
+lifter_models <- perform_manual_arp_per_lifter(df)
+```
+
