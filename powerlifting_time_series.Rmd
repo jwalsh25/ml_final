@@ -48,7 +48,7 @@ ggplot(totals, aes(x = Time, y = TotalKg)) +
 ```
 
 ```{r}
-decomp1 <- decompose(ts(totals$TotalKg, frequency = 10), type = "additive")
+decomp1 <- decompose(ts(totals$TotalKg, frequency = 25), type = "additive")
 plot(decomp1)
 ```
 
@@ -61,8 +61,6 @@ totals <- na.omit(totals)
 
 acf(totals$TotalKg)
 ```
-
-It looks like we see a correlation through the first 3-4 lags, we will use 4 to be safe
 
 ```{r}
 train_size <- round(0.8 * nrow(totals))
@@ -78,32 +76,39 @@ head(train_data)
 ```
 
 ```{r}
-X_train <- train_data$Lag_1
-
-# Scatterplot to confirm correlation at Lag 1
-plot(X_train, y_train, xlab = "Lag 1 Total", ylab = "Observed Total", main = "Lag 1 vs Total")
+X_train <- diff(train_data$Lag_1)
 
 # Fit AR(1) Model (OLS)
 # X_matrix <- as.matrix(cbind(1, X_train))  # Add intercept column (if desired)
 X_matrix <- matrix(X_train, ncol=1)
-y_vector <- matrix(y_train, ncol=1)
+y_vector <- matrix(y_train[-1], ncol=1)
 w <- solve(t(X_matrix) %*% X_matrix) %*% (t(X_matrix) %*% y_vector)
 w
 
 # Predict Total using AR(1)
 y_pred <- numeric(length(y_test))
 start <- tail(X_train, 1)
+start
 
 for (i in 1:length(y_test)) {
   # y_pred[i] <- as.numeric(w[1] + w[2] * start) # if using intercept
   y_pred[i] <- as.numeric(w*start)
   start <- y_pred[i]
 }
+
+y_pred
+
+final_predictions <- y_pred + tail(y_train, 1)
 ```
 
 ```{r}
+y_test
+```
+
+
+```{r}
 # Observed vs predicted plot
-plot(y_pred, y_test, ylab = "Observed Totals", xlab = "Predicted Totals", main = "AR(1) Model Predictions")
+plot(final_predictions, y_test, ylab = "Observed Totals", xlab = "Predicted Totals", main = "AR(1) Model Predictions")
 abline(0, 1, col = "red")
 
 # Time series plot of actual vs predicted SO9
@@ -127,7 +132,7 @@ w <- as.matrix(w, ncol=1)
 
 # Predict Total using AR(4)
 y_pred <- numeric(length(y_test))
-start <- tail(X_train, 1)
+start <- tail(X_train, 4)
 
 start <- as.matrix(start, ncol=1)
 start <- t(start)
@@ -135,20 +140,23 @@ start <- t(start)
 for (i in 1:length(y_test)) {
   # y_pred[i] <- as.numeric(w[1] + w[2] * start) # if using intercept
   y_pred[i] <- as.numeric(t(w) %*% start)
+  y_pred[i]
   start <- rbind(start, y_pred[i])
   start <- start[-1,]
   start <- as.matrix(start, ncol=1)
 }
+
+final_predictions <- y_pred + tail(y_train, 1)
 ```
 
 ```{r}
 # Observed vs predicted plot
-plot(y_pred, y_test, ylab = "Observed Totals", xlab = "Predicted Totals", main = "AR(4) Model Predictions")
+plot(final_predictions, y_test, ylab = "Observed Totals", xlab = "Predicted Totals", main = "AR(4) Model Predictions")
 abline(0, 1, col = "red")
 
 # Time series plot of actual vs predicted Totals
 plot(test_data$Time, test_data$TotalKg, type = "l", col = "blue", lwd = 2, ylim = range(c(y_pred, test_data$TotalKg)), xlab = "Time", ylab = "Total", main = "AR(4) Model Predictions")
-lines(test_data$Time, y_pred, col = "red", lwd = 2, lty = 2)
+lines(test_data$Time, final_predictions, col = "red", lwd = 2, lty = 2)
 legend("topleft", legend = c("Actual Total", "AR(4) Predicted Total"), col = c("blue", "red"), lty = c(1, 2), bty = "n")
 ```
 
