@@ -1,0 +1,250 @@
+---
+title: "DS 4420 Final Project"
+author: "Jordan Walsh"
+date: "2025-04-13"
+output: html_document
+---
+
+```{r}
+# Read in the data
+df = read.csv("openpowerlifting.csv")
+
+# Select only tested full power meets
+df = df[df$Event == "SBD",]
+df = df[df$Tested == "Yes",]
+dim(df) 
+```
+
+```{r}
+# Drop columns that are not useful
+df = df[, !(names(df) %in% c("Event", "Squat4Kg", "Bench4Kg", "Deadlift4Kg", "Tested",
+                             "MeetName", "Wilks", "Glossbrenner", "Goodlift", "Sanctioned",
+                             "AgeClass", "BirthYearClass", "Country", "State", "MeetCountry",
+                             "MeetState", "MeetTown"))]
+```
+
+```{r}
+# Drop rows for multiple divisions at the same meet
+df = df[!duplicated(df[c("Name", "Date", "Federation")]),]
+```
+
+```{r}
+# Only include lifters who officially totaled
+df = df[df$TotalKg > 0,]
+```
+
+```{r}
+NUM_MEETS = 10
+
+# Filter for people with more than N meets
+lifters = df[ave(df$Name, df$Name, FUN=length) >= NUM_MEETS,]
+
+dim(lifters)
+```
+
+```{r}
+# Encode fields
+lifters$Sex = as.integer(factor(lifters$Sex))
+lifters$Equipment = as.integer(factor(lifters$Equipment))
+lifters$Division = as.integer(factor(lifters$Division))
+lifters$Federation = as.integer(factor(lifters$Federation))
+lifters$ParentFederation = as.integer(factor(lifters$ParentFederation))
+lifters$Place = as.integer(factor(lifters$Place))
+lifters$WeightClassKg = as.integer(factor(lifters$WeightClassKg))
+lifters$Date = as.Date(lifters$Date)
+
+head(lifters)
+```
+
+```{r}
+library(data.table)
+lifters_dt = as.data.table(lifters)
+lifters_dt[, MinDate := min(Date), by=Name]
+lifters_dt[, Time := as.integer(difftime(Date, MinDate, units = "days"))]
+lifters_dt[, c("Date", "MinDate") := NULL]
+
+lifters_dt$Time = as.integer(lifters_dt$Date - lifters_dt$MinDate)
+lifters_dt$Date = NULL
+lifters_dt$MinDate = NULL
+```
+
+```{r}
+lift_cols = c("Squat1Kg", "Bench1Kg", "Deadlift1Kg",
+              "Squat2Kg", "Bench2Kg", "Deadlift2Kg",
+              "Squat3Kg", "Bench3Kg", "Deadlift3Kg",
+              "Best3SquatKg", "Best3BenchKg", "Best3DeadliftKg",
+              "TotalKg", "Dots")
+
+for (col in lift_cols) {
+  lifters_dt[is.na(get(col)), (col) := 0]
+}
+
+fill_neg1 = c("Place", "Age", "BodyweightKg")
+
+for (col in fill_neg1) {
+  lifters_dt[is.na(get(col)), (col) := -1]
+}
+```
+
+```{r}
+plot_lifter = function(name) {
+  lifter_data = lifters_dt[lifters_dt$Name == name,]
+  lifter_data = lifter_data[order(lifter_data$Time),]
+
+  x = lifter_data$Time
+  y = lifter_data$TotalKg
+
+  plot(x, y, type = "l", xlab = "Time (days)", ylab = "Total (kg)", main = name)
+}
+```
+
+```{r}
+# Sample lifter plot
+plot_lifter("Austin Perkins #1")
+```
+
+```{r}
+ap = lifters_dt[Name == "Austin Perkins #1"]
+recent = ap[order(-Time)][1:NUM_MEETS][order(Time)]
+```
+
+```{r}
+X = list()
+y = list()
+DEBUG = FALSE
+
+names = unique(lifters_dt$Name)
+cat(length(names), "\n")
+
+for (i in seq_along(names)) {
+  if (DEBUG && i == 100) {
+    break
+  }
+  
+  name = names[i]
+  lifter = lifters_dt[Name == name]
+  lifter_sorted = lifter[order(Time)]
+  
+  if (nrow(lifter_sorted) < NUM_MEETS) {
+    next
+  }
+  
+  history = lifter_sorted[(.N - NUM_MEETS + 1):( .N - 1)]
+  history[, Name := NULL]
+  history_vec = as.vector(t(as.matrix(history)))
+  
+  time_to_recent = lifter_sorted[.N]$Time - lifter_sorted[.N - 1]$Time
+  equipment = lifter_sorted[.N]$Equipment
+  
+  # Check for NA
+  test = as.data.frame(matrix(history_vec, nrow = 1))
+  if (any(is.na(test))) {
+    print("NaN history")
+    print(time_to_recent)
+    print(equipment)
+    print(history_vec)
+    print(i)
+    break
+  }
+  
+  if (is.na(time_to_recent)) {
+    print("NaN time_to_recent")
+    print(time_to_recent)
+    print(equipment)
+    print(history_vec)
+    print(i)
+    break
+  }
+  
+  if (is.na(equipment)) {
+    print("NaN equipment")
+    print(time_to_recent)
+    print(equipment)
+    print(history_vec)
+    print(i)
+    break
+  }
+  
+  full_history = c(history_vec, time_to_recent, equipment)
+  recent_total = lifter_sorted[.N]$TotalKg
+  
+  X[[length(X) + 1]] = full_history
+  y[[length(y) + 1]] = recent_total
+}
+```
+
+```{r}
+# Filter and sort
+
+# Drop rows with missing TotalKg or Time
+lifters_dt = lifters_dt[!is.na(lifters_dt$TotalKg),]
+lifters_dt = lifters_dt[!is.na(lifters_dt$Time),]
+
+# Sort by lifter and time
+lifters_dt = lifters_dt[order(lifters_dt$Name, lifters_dt$Time),]
+
+# Add a MeetNum per lifter
+lifters_dt$Time = as.numeric(lifters_dt$Time)
+lifters_dt$MeetNum = ave(lifters_dt$Time, lifters_dt$Name, FUN = function(x) seq_along(x))
+
+# Create the user-item matrix
+
+unique_lifters = unique(lifters_dt$Name)
+max_meets = max(lifters_dt$MeetNum, na.rm = TRUE)
+
+rating_matrix = matrix(NA, nrow = length(unique_lifters), ncol = max_meets)
+rownames(rating_matrix) = unique_lifters
+colnames(rating_matrix) = paste0("Meet", 1:max_meets)
+
+# Match Name to matrix row
+row_idx = match(lifters_dt$Name, unique_lifters)
+col_idx = lifters_dt$MeetNum
+
+rating_matrix[cbind(row_idx, col_idx)] = lifters_dt$TotalKg
+
+# Cosine similarity function
+
+cosine_similarity = function(a, b) {
+  overlap = !is.na(a) & !is.na(b)
+  if (sum(overlap) == 0) {
+    return(0)
+  }
+  a = a[overlap]
+  b = b[overlap]
+  num = sum(a * b)
+  denom = sqrt(sum(a^2)) * sqrt(sum(b^2))
+  if (denom == 0) {
+    return(0)
+  }
+  return(num / denom)
+}
+
+# Predict missing TotalKg using CF
+
+predict_rating = function(user_idx, item_idx, matrix, k = 5) {
+  target = matrix[user_idx,]
+  sims = rep(NA, nrow(matrix))
+  for (i in 1:nrow(matrix)) {
+    if (i != user_idx && !is.na(matrix[i, item_idx])) {
+      sims[i] <- cosine_similarity(target, matrix[i,])
+    }
+  }
+  valid = which(!is.na(sims))
+  if (length(valid) == 0) {
+    return(NA)
+  }
+  top_k = head(valid[order(sims[valid], decreasing = TRUE)], k)
+  pred = sum(sims[top_k] * matrix[top_k, item_idx]) / sum(abs(sims[top_k]))
+  return(pred)
+}
+
+# Example prediction
+
+missing_idx = which(is.na(rating_matrix), arr.ind = TRUE)[1,]
+user_idx = missing_idx[1]
+item_idx = missing_idx[2]
+
+predicted = predict_rating(user_idx, item_idx, rating_matrix)
+cat("Predicted TotalKg for", rownames(rating_matrix)[user_idx],
+    "on", colnames(rating_matrix)[item_idx], ":", round(predicted, 1))
+```

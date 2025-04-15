@@ -1,0 +1,296 @@
+---
+title: "time_series_2"
+author: "Charlie Pepin-Woods"
+date: "2025-04-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r}
+library(dplyr)
+
+# calculate the pacf values up to the maximum lag
+get_pacfs <- function(series, max_lag = 10) {
+  n <- length(series)
+  pacf_vals <- numeric(max_lag)
+  
+  for (k in 3:max_lag) {
+    if (n <= k) {
+      pacf_vals[k] <- NA
+      next
+    }
+    
+    Y <- series[(k+1):n]
+    X <- embed(series, k + 1)[, -1]
+    
+    lambda <- 1e-5
+    coefs <- solve(t(X) %*% X + lambda * diag(ncol(X))) %*% t(X) %*% Y
+    # fit <- lm(Y ~ X)
+    pacf_vals[k] <- coefs[k + 1]
+  }
+  
+  return(pacf_vals)
+}
+
+# get the best lag from the list of pacf vals
+get_best_lag <- function(pacf_vals, threshold = 0.2) {
+  for (i in 3:3+length(pacf_vals)) {
+    if (is.na(pacf_vals[i]) || abs(pacf_vals[i]) < threshold) {
+      return(max(1, i - 1))
+    }
+  }
+  return(length(pacf_vals))
+}
+
+# get AR(p)
+fit_ar <- function(series, p) {
+  n <- length(series)
+  X <- embed(series, p + 1)[, -1]
+  y <- embed(series, p + 1)[, 1]
+  X <- cbind(1, X)
+  
+  lambda <- 1e-5
+  coefs <- solve(t(X) %*% X + lambda * diag(ncol(X))) %*% t(X) %*% y
+  return(list(coefs = coefs, order = p))
+}
+```
+
+```{r}
+# main function
+get_models <- function(df, max_lag = 10, pacf_threshold = 0.2) {
+  df$Time <- as.POSIXct(df$Time)
+  results <- list()
+  
+  for (lifter in unique(df$Name)) {
+    lifter_df <- df %>%
+      filter(Name == lifter) %>%
+      arrange(Time)
+    
+    series <- lifter_df$TotalKg
+    
+    if (length(series) < max_lag + 1) {
+      cat("Skipping", lifter, "- not enough data\n")
+      next
+    }
+    
+    pacf_vals <- get_pacfs(series, max_lag)
+    optimal_lag <- get_best_lag(pacf_vals, pacf_threshold)
+    
+    
+    ar_model <- fit_ar(series, optimal_lag)
+    
+    if (!is.null(ar_model)) {
+      results[[lifter]] <- list(
+        ar_model = ar_model,
+        pacf = pacf_vals,
+        optimal_lag = optimal_lag
+      )
+    }
+  }
+  
+  return(results)
+}
+```
+
+```{r}
+df <- read.csv("data/openpowerlifting_interpolated.csv")
+lifter_models <- get_models(df)
+```
+
+```{r}
+lifter_models["A J Vasquez"]
+```
+
+```{r}
+get_mse <- function(series, model) {
+  p <- model$order
+  coeffs <- model$coefficients
+  n <- length(series)
+
+  if (n <= p + 1) {
+    return(NULL)
+  }
+
+  
+  preds <- numeric(n - p)
+  actual <- series[(p + 1):n]
+
+  for (t in (p + 1):n) {
+    lagged <- rev(series[(t - p):(t - 1)])
+    X <- c(1, lagged) 
+    preds[t - p] <- sum(X * coeffs)
+  }
+
+  residuals <- actual - preds
+  mse <- mean(residuals^2)
+
+  list(
+    predictions = preds,
+    actual = actual,
+    residuals = residuals,
+    MSE = mse
+  )
+}
+```
+
+```{r}
+mse_all_lifters <- function(df, models) {
+  scores <- list()
+
+  for (lifter in names(models)) {
+    model_info <- models[[lifter]]
+    ar_model <- model_info$ar_model
+
+    series <- df %>%
+      filter(Name == lifter) %>%
+      arrange(Time) %>%
+      pull(TotalKg)
+
+    score <- get_mse(series, ar_model)
+
+    if (!is.null(score)) {
+      scores[[lifter]] <- score
+    }
+  }
+
+  return(scores)
+}
+```
+
+```{r}
+next_k_steps <- function(series, ar_model, k) {
+  p <- ar_model$order
+  coefs <- ar_model$coefs
+  history <- tail(series, p)
+  preds <- numeric(k)
+
+  for (i in 1:k) {
+    x <- c(1, rev(history[(length(history) - p + 1):length(history)]))
+    next_val <- sum(coefs * x)
+    preds[i] <- next_val
+    history <- c(history, next_val)
+  }
+  return(preds)
+}
+```
+
+```{r}
+fix_predictions <- function(last_val, predicted_diffs) {
+  cumsum(c(last_val, predicted_diffs))[-1]
+}
+```
+
+```{r}
+get_accuracies <- function(df, k) {
+  df$Time <- as.POSIXct(df$Time)
+  test_results <- list()
+
+  for (lifter in unique(df$Name)) {
+    lifter_df <- df %>%
+      filter(Name == lifter) %>%
+      arrange(Time)
+
+    original_series <- lifter_df$TotalKg
+    n <- length(original_series)
+
+    if (n <= k + 10) next
+
+    train_series <- original_series[1:(n - k)]
+    true_future <- original_series[(n - k + 1):n]
+
+    diff_series <- diff(train_series)
+    last_val <- tail(train_series, 1)
+
+    pacf_vals <- get_pacfs(diff_series, max_lag = 10)
+    optimal_lag <- get_best_lag(pacf_vals, threshold = 0.2)
+    ar_model <- fit_ar(diff_series, optimal_lag)
+
+    diff_preds <- next_k_steps(diff_series, ar_model, k)
+    final_preds <- fix_predictions(last_val, diff_preds)
+
+    residuals <- true_future - final_preds
+    mse <- mean(residuals^2)
+    r2 <- cor(true_future, final_preds) ^ 2
+
+    test_results[[lifter]] <- list(
+      predictions = final_preds,
+      actual = true_future,
+      MSE = mse,
+      R2 = r2,
+      order = optimal_lag
+    )
+  }
+
+  return(test_results)
+}
+
+```
+
+```{r}
+results <- get_accuracies(df, k = 20)
+
+results[["A J Vasquez"]]$R2
+
+```
+
+```{r}
+library(ggplot2)
+library(tidyr)
+
+plot_lifter_predictions <- function(lifter_name, test_results) {
+  result <- test_results[[lifter_name]]
+
+  if (is.null(result)) {
+    warning(paste("No prediction results found for", lifter_name))
+    return(NULL)
+  }
+
+  k <- length(result$predictions)
+
+  plot_df <- data.frame(
+    Step = 1:k,
+    Predicted = result$predictions,
+    Actual = result$actual
+  ) %>%
+    pivot_longer(cols = c(Predicted, Actual), names_to = "Type", values_to = "Value")
+
+  ggplot(plot_df, aes(x = Step, y = Value, color = Type)) +
+    geom_line(size = 1.2) +
+    geom_point(size = 2) +
+    scale_color_manual(values = c("Actual" = "#1b9e77", "Predicted" = "#d95f02")) +
+    labs(
+      title = paste("Predicted vs Actual for", lifter_name),
+      x = "Step Ahead",
+      y = "TotalKg",
+      color = "Legend"
+    ) +
+    theme_minimal(base_size = 14)
+}
+
+```
+
+```{r}
+plot_lifter_predictions("A J Vasquez", results)
+
+```
+
+```{r}
+
+s <- 0
+
+for (lifter in results) {
+  if (is.na(lifter$R2)) {
+    next
+  }
+  s <- s + lifter$R2
+}
+
+cat("Average R^2 Value:", s / length(results), "\n")
+
+```
+
